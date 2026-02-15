@@ -50,7 +50,8 @@ class ODriveWorker(QThread):
                     # ----------------------------------------------------
 
                     self.connection_status.emit(True, "Connected")
-                except:
+                except Exception as e:
+                    print(f"ODrive connection failed: {e}")
                     time.sleep(1)
                     continue
             try:
