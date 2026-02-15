@@ -55,6 +55,7 @@ class ODriveWorker(QThread):
                     continue
             try:
                 data = {
+                    "iq": self.odrv.axis0.motor.current_control.Iq_measured,
                     "vbus": self.odrv.vbus_voltage,
                     "pos": self.odrv.axis0.encoder.pos_estimate,
                     "vel": self.odrv.axis0.encoder.vel_estimate,
@@ -126,8 +127,8 @@ class MainWindow(QMainWindow):
         self.resize(1300, 900)
         self.setStyleSheet("QMainWindow { background-color: #f5f5f5; } QGroupBox { font-weight: bold; }")
 
-        self.max_points = 100
-        self.vbus_data, self.pos_data, self.vel_data = [], [], []
+        self.max_points = 200
+        self.vbus_data, self.pos_data, self.vel_data, self.iq_data = [], [], [], [] # Added iq_data
         self.current_axis_state = 0  # Default to undefined
 
         self.worker = ODriveWorker()
@@ -150,6 +151,8 @@ class MainWindow(QMainWindow):
         status_layout = QVBoxLayout()
         self.status_label = QLabel("Status: Searching...")
         self.vbus_label = QLabel("VBus: 0.00V")
+        self.current_label = QLabel("Motor Current: 0.00 A")
+        self.power_label = QLabel("Power: 0.00 W")
         self.estop_btn = QPushButton("EMERGENCY IDLE")
         self.estop_btn.setStyleSheet(
             f"background-color: {MPL_RED}; color: white; font-weight: bold; height: 40px; border-radius: 5px;")
@@ -157,6 +160,8 @@ class MainWindow(QMainWindow):
         status_layout.addWidget(self.status_label)
         status_layout.addWidget(self.vbus_label)
         status_layout.addWidget(self.estop_btn)
+        status_layout.addWidget(self.current_label)
+        status_layout.addWidget(self.power_label)
         status_group.setLayout(status_layout)
         left_panel.addWidget(status_group)
 
@@ -248,10 +253,16 @@ class MainWindow(QMainWindow):
         # --- RIGHT PANEL ---
         right_panel = QVBoxLayout()
         self.vbus_plot = pg.PlotWidget(title="Bus Voltage")
+        self.iq_plot = pg.PlotWidget(title="IQ Current")  # Added IQ plot
         self.motion_plot = pg.PlotWidget(title="Motion Telemetry")
         self._style_plot(self.vbus_plot, "V", "V")
         self._style_plot(self.motion_plot, "Value", "Turns")
+        self._style_plot(self.iq_plot, "A", "A")
         self.vbus_curve = self.vbus_plot.plot(pen=pg.mkPen(MPL_BLUE, width=2))
+
+        self.iq_curve = self.iq_plot.plot(pen=pg.mkPen(MPL_RED, width=2))  # Added IQ curve
+        self.power_curve = self.iq_plot.plot(pen=pg.mkPen(MPL_ORANGE, width=2))  # Added Power curve (scaled IQ for visualization)
+
         self.pos_curve = self.motion_plot.plot(pen=pg.mkPen(MPL_ORANGE, width=2), name="Position")
         self.vel_curve = self.motion_plot.plot(pen=pg.mkPen(MPL_GREEN, width=2), name="Velocity")
 
@@ -265,6 +276,7 @@ class MainWindow(QMainWindow):
         readout_layout.addWidget(self.label_live_vel)
 
         right_panel.addWidget(self.vbus_plot, 1)
+        right_panel.addWidget(self.iq_plot, 1)  # Added IQ plot to right panel
         right_panel.addWidget(self.motion_plot, 2)
         right_panel.addLayout(readout_layout)
         main_layout.addLayout(right_panel, 3)
@@ -377,6 +389,13 @@ class MainWindow(QMainWindow):
         self.label_ctrl_mode.setText(f"Ctrl Mode: {ctrl_modes.get(data['ctrl_mode'], data['ctrl_mode'])}")
         self.label_inp_mode.setText(f"Inp Mode: {data['input_mode']}")
 
+        current_amps = data['iq']
+        bus_voltage = data['vbus']
+        power_watts = bus_voltage * abs(current_amps)  # If using ibus for input power
+
+        self.current_label.setText(f"Motor Current: {current_amps:.2f} A")
+        self.power_label.setText(f"Power: {power_watts:.1f} W")
+
         self.vbus_label.setText(f"VBus: {data['vbus']:.2f}V")
         self.label_shadow.setText(f"Shadow: {data['shadow']}")
         self.label_error.setText(f"Error: {hex(data['error'])}")
@@ -384,15 +403,20 @@ class MainWindow(QMainWindow):
         self.label_live_vel.setText(f"Vel: {data['vel']:.3f} Turns/s")
 
         # History updates for plots
+        self.iq_data.append(data['iq'])
         self.vbus_data.append(data['vbus'])
         self.pos_data.append(data['pos'])
         self.vel_data.append(data['vel'])
 
-        if len(self.vbus_data) > self.max_points:
+        # Keep list sizes managed
+        if len(self.iq_data) > self.max_points:
+            self.iq_data.pop(0)
             self.vbus_data.pop(0)
             self.pos_data.pop(0)
             self.vel_data.pop(0)
 
+        # Update the curves
+        self.iq_curve.setData(self.iq_data)
         self.vbus_curve.setData(self.vbus_data)
         self.pos_curve.setData(self.pos_data)
         self.vel_curve.setData(self.vel_data)
