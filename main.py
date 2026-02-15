@@ -3,7 +3,8 @@ import time
 import odrive
 from odrive.enums import *
 from PySide6.QtWidgets import (QApplication, QMainWindow, QPushButton, QVBoxLayout,
-                               QWidget, QHBoxLayout, QLabel, QLineEdit, QGridLayout, QGroupBox)
+                               QWidget, QHBoxLayout, QLabel, QLineEdit, QGridLayout,
+                               QGroupBox, QComboBox, QSlider)
 from PySide6.QtCore import Qt, QThread, Signal, Slot
 import pyqtgraph as pg
 
@@ -11,6 +12,7 @@ import pyqtgraph as pg
 MPL_BLUE = '#1f77b4'
 MPL_ORANGE = '#ff7f0e'
 MPL_GREEN = '#2ca02c'
+MPL_RED = '#d62728'
 
 
 class ODriveWorker(QThread):
@@ -33,7 +35,6 @@ class ODriveWorker(QThread):
                     time.sleep(1)
                     continue
             try:
-                # ODrive units: pos_estimate is in [turns], vel_estimate is in [turns/s]
                 data = {
                     "vbus": self.odrv.vbus_voltage,
                     "pos": self.odrv.axis0.encoder.pos_estimate,
@@ -49,42 +50,47 @@ class ODriveWorker(QThread):
                 self.odrv = None
                 self.connection_status.emit(False, "Disconnected")
 
+    def set_state(self, state_code):
+        if self.odrv:
+            self.odrv.axis0.requested_state = state_code
+
+    def update_tuning(self, pos_g, vel_g, vel_i_g, mode):
+        if self.odrv:
+            self.odrv.axis0.controller.config.control_mode = mode
+            self.odrv.axis0.controller.config.pos_gain = pos_g
+            self.odrv.axis0.controller.config.vel_gain = vel_g
+            self.odrv.axis0.controller.config.vel_integrator_gain = vel_i_g
+
+    def set_input(self, value, is_pos_mode):
+        if self.odrv:
+            if is_pos_mode:
+                self.odrv.axis0.controller.input_pos = value
+            else:
+                self.odrv.axis0.controller.input_vel = value
+
     def clear_errors(self):
         if self.odrv:
-            # Standard ODrive V3.6 clear error command
             self.odrv.axis0.error = 0
             self.odrv.axis0.encoder.error = 0
             self.odrv.axis0.motor.error = 0
-
-    def update_config(self, cs_pin, cpr):
-        if self.odrv:
-            try:
-                self.odrv.axis0.encoder.config.abs_spi_cs_gpio_pin = cs_pin
-                self.odrv.axis0.encoder.config.mode = ENCODER_MODE_SPI_ABS_AMS
-                self.odrv.axis0.encoder.config.cpr = cpr
-                self.odrv.save_configuration()
-                try:
-                    self.odrv.reboot()
-                except:
-                    pass
-                self.odrv = None
-            except Exception as e:
-                print(f"Config Error: {e}")
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ODrive Telemetry - Pro View")
-        self.resize(1200, 850)
+        self.setWindowTitle("ODrive MKS Pro-Tuning Interface")
+        self.resize(1300, 900)
         self.setStyleSheet("QMainWindow { background-color: #f5f5f5; } QGroupBox { font-weight: bold; }")
 
         self.max_points = 100
         self.vbus_data, self.pos_data, self.vel_data = [], [], []
 
+        # FIX: Define worker BEFORE setup_ui to avoid AttributeError
+        self.worker = ODriveWorker()
+
         self._setup_ui()
 
-        self.worker = ODriveWorker()
+        # Connect signals
         self.worker.data_received.connect(self.update_telemetry)
         self.worker.connection_status.connect(self.update_status)
         self.worker.start()
@@ -94,117 +100,160 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         main_layout = QHBoxLayout(central)
 
-        # Left Panel (Controls & Labels)
+        # --- LEFT PANEL ---
         left_panel = QVBoxLayout()
 
-        # 1. System Info
-        info_group = QGroupBox("System Info")
-        info_layout = QGridLayout()
+        # 1. System Status
+        status_group = QGroupBox("System Status")
+        status_layout = QVBoxLayout()
         self.status_label = QLabel("Status: Searching...")
         self.vbus_label = QLabel("VBus: 0.00V")
-        info_layout.addWidget(self.status_label, 0, 0)
-        info_layout.addWidget(self.vbus_label, 1, 0)
-        info_group.setLayout(info_layout)
-        left_panel.addWidget(info_group)
+        self.estop_btn = QPushButton("EMERGENCY IDLE")
+        self.estop_btn.setStyleSheet(
+            f"background-color: {MPL_RED}; color: white; font-weight: bold; height: 40px; border-radius: 5px;")
+        self.estop_btn.clicked.connect(lambda: self.worker.set_state(AXIS_STATE_IDLE))
+        status_layout.addWidget(self.status_label)
+        status_layout.addWidget(self.vbus_label)
+        status_layout.addWidget(self.estop_btn)
+        status_group.setLayout(status_layout)
+        left_panel.addWidget(status_group)
 
-        # 2. Encoder Data (Requested Telemetry)
-        tele_group = QGroupBox("Live Encoder Telemetry")
-        tele_layout = QVBoxLayout()
+        # 2. Tuning & Control
+        tune_group = QGroupBox("Control & Tuning")
+        tune_layout = QGridLayout()
+        self.mode_select = QComboBox()
+        self.mode_select.addItems(["Position Control", "Velocity Control"])
+        self.pos_g_input = QLineEdit("20.0")
+        self.vel_g_input = QLineEdit("0.0005")
+        self.vel_i_input = QLineEdit("0.001")
+
+        tune_layout.addWidget(QLabel("Mode:"), 0, 0)
+        tune_layout.addWidget(self.mode_select, 0, 1)
+        tune_layout.addWidget(QLabel("Pos Gain:"), 1, 0)
+        tune_layout.addWidget(self.pos_g_input, 1, 1)
+        tune_layout.addWidget(QLabel("Vel Gain:"), 2, 0)
+        tune_layout.addWidget(self.vel_g_input, 2, 1)
+        tune_layout.addWidget(QLabel("Vel Int Gain:"), 3, 0)
+        tune_layout.addWidget(self.vel_i_input, 3, 1)
+
+        self.apply_tuning_btn = QPushButton("Apply Gains & Close Loop")
+        self.apply_tuning_btn.clicked.connect(self.apply_tuning)
+        tune_layout.addWidget(self.apply_tuning_btn, 4, 0, 1, 2)
+        tune_group.setLayout(tune_layout)
+        left_panel.addWidget(tune_group)
+
+        # 3. Target Setpoint (Slider + Input Field)
+        setpoint_group = QGroupBox("Target Setpoint")
+        setpoint_layout = QVBoxLayout()
+
+        input_row = QHBoxLayout()
+        self.target_input = QLineEdit("0.0")
+        self.target_input.setFixedWidth(80)
+        self.target_input.returnPressed.connect(self.handle_manual_input)
+        input_row.addWidget(QLabel("Setpoint Value:"))
+        input_row.addWidget(self.target_input)
+        input_row.addStretch()
+
+        self.setpoint_slider = QSlider(Qt.Horizontal)
+        self.setpoint_slider.setRange(-100, 100)  # -10.0 to 10.0
+        self.setpoint_slider.valueChanged.connect(self.handle_slider_input)
+
+        setpoint_layout.addLayout(input_row)
+        setpoint_layout.addWidget(self.setpoint_slider)
+        setpoint_group.setLayout(setpoint_layout)
+        left_panel.addWidget(setpoint_group)
+
+        # 4. Diagnostics
+        diag_group = QGroupBox("Diagnostics")
+        diag_layout = QVBoxLayout()
         self.label_shadow = QLabel("Shadow Count: 0")
-        self.label_state = QLabel("Axis State: 0")
         self.label_error = QLabel("Axis Error: 0x0")
-        self.label_enc_error = QLabel("Enc Error: 0x0")
-
-        tele_layout.addWidget(self.label_shadow)
-        tele_layout.addWidget(self.label_state)
-        tele_layout.addWidget(self.label_error)
-        tele_layout.addWidget(self.label_enc_error)
-
         self.clear_btn = QPushButton("Clear Errors")
-        self.clear_btn.clicked.connect(lambda: self.worker.clear_errors())
-        tele_layout.addWidget(self.clear_btn)
-
-        tele_group.setLayout(tele_layout)
-        left_panel.addWidget(tele_group)
-
-        # 3. Setup Configuration
-        config_group = QGroupBox("Encoder Hardware Config")
-        cfg_grid = QGridLayout()
-        self.cs_input = QLineEdit("7")
-        self.cpr_input = QLineEdit("16384")
-        cfg_grid.addWidget(QLabel("CS Pin:"), 0, 0)
-        cfg_grid.addWidget(self.cs_input, 0, 1)
-        cfg_grid.addWidget(QLabel("CPR:"), 1, 0)
-        cfg_grid.addWidget(self.cpr_input, 1, 1)
-        self.apply_btn = QPushButton("Save & Reboot")
-        self.apply_btn.clicked.connect(self.apply_settings)
-        cfg_grid.addWidget(self.apply_btn, 2, 0, 1, 2)
-        config_group.setLayout(cfg_grid)
-        left_panel.addWidget(config_group)
+        self.clear_btn.clicked.connect(self.worker.clear_errors)
+        diag_layout.addWidget(self.label_shadow)
+        diag_layout.addWidget(self.label_error)
+        diag_layout.addWidget(self.clear_btn)
+        diag_group.setLayout(diag_layout)
+        left_panel.addWidget(diag_group)
 
         left_panel.addStretch()
         main_layout.addLayout(left_panel, 1)
 
-        # Right Panel (Plots & Live Readouts)
+        # --- RIGHT PANEL (Plots & Big Labels) ---
         right_panel = QVBoxLayout()
-        self.vbus_plot = pg.PlotWidget(title="Bus Voltage History")
+
+        # Plots
+        self.vbus_plot = pg.PlotWidget(title="Bus Voltage")
         self.motion_plot = pg.PlotWidget(title="Motion Telemetry")
-
-        self._style_plot(self.vbus_plot, "Voltage", "V")
+        self._style_plot(self.vbus_plot, "V", "V")
         self._style_plot(self.motion_plot, "Value", "Turns")
+        self.vbus_curve = self.vbus_plot.plot(pen=pg.mkPen(MPL_BLUE, width=2))
+        self.pos_curve = self.motion_plot.plot(pen=pg.mkPen(MPL_ORANGE, width=2), name="Position")
+        self.vel_curve = self.motion_plot.plot(pen=pg.mkPen(MPL_GREEN, width=2), name="Velocity")
 
-        self.vbus_curve = self.vbus_plot.plot(pen=pg.mkPen(MPL_BLUE, width=2.5), name="VBus [V]")
-        self.pos_curve = self.motion_plot.plot(pen=pg.mkPen(MPL_ORANGE, width=2.5), name="Position [Turns]")
-        self.vel_curve = self.motion_plot.plot(pen=pg.mkPen(MPL_GREEN, width=2.5), name="Velocity [Turns/s]")
-
-        # NEW: Live Readout Labels below the motion plot
+        # Big Live Readouts (The labels you wanted back)
         readout_layout = QHBoxLayout()
+        readout_style = "font-size: 16pt; font-weight: bold; padding: 10px; border: 1px solid #ccc; border-radius: 8px; background: white;"
         self.label_live_pos = QLabel("Pos: 0.000")
         self.label_live_vel = QLabel("Vel: 0.000")
-
-        # Apply some styling to make them readable
-        readout_style = "font-size: 14pt; font-weight: bold; padding: 5px; border: 1px solid #ddd; border-radius: 4px; background: white;"
         self.label_live_pos.setStyleSheet(readout_style + f" color: {MPL_ORANGE};")
         self.label_live_vel.setStyleSheet(readout_style + f" color: {MPL_GREEN};")
-
         readout_layout.addWidget(self.label_live_pos)
         readout_layout.addWidget(self.label_live_vel)
 
-        right_panel.addWidget(self.vbus_plot)
-        right_panel.addWidget(self.motion_plot)
-        right_panel.addLayout(readout_layout)  # Add the labels to the layout
-
+        right_panel.addWidget(self.vbus_plot, 1)
+        right_panel.addWidget(self.motion_plot, 2)
+        right_panel.addLayout(readout_layout)
         main_layout.addLayout(right_panel, 3)
 
-    def _style_plot(self, plot_widget, y_name, unit):
-        plot_widget.setBackground('w')
-        plot_widget.showGrid(x=True, y=True, alpha=0.2)
-        title_style = {'color': '#222', 'size': '12pt', 'bold': True}
-        label_style = {'color': '#444', 'font-size': '10pt'}
-        plot_widget.setTitle(plot_widget.plotItem.titleLabel.text, **title_style)
-        plot_widget.setLabel('left', f"{y_name} ({unit})", **label_style)
-        plot_widget.setLabel('bottom', "Time (Samples)", **label_style)
-        plot_widget.addLegend(offset=(10, 10), labelTextColor='#333', brush=pg.mkBrush(255, 255, 255, 200))
-        pen = pg.mkPen(color='#888', width=1)
-        for axis in ['left', 'bottom']:
-            ax = plot_widget.getAxis(axis)
-            ax.setPen(pen)
-            ax.setTextPen(pen)
+    def _style_plot(self, plot, y_name, unit):
+        plot.setBackground('w')
+        plot.showGrid(x=True, y=True, alpha=0.3)
+        plot.setLabel('left', y_name, units=unit)
+        plot.addLegend(offset=(10, 10))
+
+    # --- Target Handling ---
+    def handle_slider_input(self, val):
+        scaled_val = val / 10.0
+        self.target_input.setText(str(scaled_val))
+        self.send_target(scaled_val)
+
+    def handle_manual_input(self):
+        try:
+            val = float(self.target_input.text())
+            # Sync slider (multiply back)
+            self.setpoint_slider.blockSignals(True)
+            self.setpoint_slider.setValue(int(val * 10))
+            self.setpoint_slider.blockSignals(False)
+            self.send_target(val)
+        except ValueError:
+            pass
+
+    def send_target(self, val):
+        is_pos = self.mode_select.currentIndex() == 0
+        self.worker.set_input(val, is_pos)
+
+    def apply_tuning(self):
+        try:
+            pg = float(self.pos_g_input.text())
+            vg = float(self.vel_g_input.text())
+            vig = float(self.vel_i_input.text())
+            mode = CONTROL_MODE_POSITION_CONTROL if self.mode_select.currentIndex() == 0 else CONTROL_MODE_VELOCITY_CONTROL
+            self.worker.update_tuning(pg, vg, vig, mode)
+            self.worker.set_state(AXIS_STATE_CLOSED_LOOP_CONTROL)
+        except ValueError:
+            print("Invalid gain values")
 
     @Slot(dict)
     def update_telemetry(self, data):
-        # Update Labels
+        # Update small and large labels
         self.vbus_label.setText(f"VBus: {data['vbus']:.2f}V")
-        self.label_shadow.setText(f"Shadow Count: {data['shadow']}")
-        self.label_state.setText(f"Axis State: {data['state']}")
-        self.label_error.setText(f"Axis Error: {hex(data['error'])}")
-        self.label_enc_error.setText(f"Enc Error: {hex(data['enc_error'])}")
-
-        # NEW: Update the live readout labels
+        self.label_shadow.setText(f"Shadow: {data['shadow']}")
+        self.label_error.setText(f"Error: {hex(data['error'])}")
         self.label_live_pos.setText(f"Pos: {data['pos']:.3f} Turns")
         self.label_live_vel.setText(f"Vel: {data['vel']:.3f} Turns/s")
 
-        # ... [Keep existing plotting code] ...
+        # Update History
         self.vbus_data.append(data['vbus'])
         self.pos_data.append(data['pos'])
         self.vel_data.append(data['vel'])
@@ -221,15 +270,9 @@ class MainWindow(QMainWindow):
     @Slot(bool, str)
     def update_status(self, connected, message):
         self.status_label.setText(f"Status: {message}")
-        self.apply_btn.setEnabled(connected)
+        self.apply_tuning_btn.setEnabled(connected)
+        self.estop_btn.setEnabled(connected)
         self.clear_btn.setEnabled(connected)
-
-    def apply_settings(self):
-        try:
-            cs, cpr = int(self.cs_input.text()), int(self.cpr_input.text())
-            self.worker.update_config(cs, cpr)
-        except ValueError:
-            pass
 
 
 if __name__ == "__main__":
