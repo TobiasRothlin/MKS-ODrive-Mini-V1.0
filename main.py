@@ -75,20 +75,19 @@ class ODriveWorker(QThread):
         if self.odrv:
             self.odrv.axis0.requested_state = state_code
 
-    def update_tuning(self, pos_g, vel_g, vel_i_g, mode):
+    # Inside ODriveWorker class
+    def update_tuning(self, pos_g, vel_g, vel_i_g, vel_lim, mode):  # Added vel_lim
         if self.odrv:
-            # Set the primary control mode (Position vs Velocity)
             self.odrv.axis0.controller.config.control_mode = mode
-
-            # CRITICAL: Set input_mode to PASSTHROUGH (Value 1)
-            # This ensures it ignores previous position trajectories
             self.odrv.axis0.controller.config.input_mode = 1
+
+            # Apply the limit here
+            self.odrv.axis0.controller.config.vel_limit = vel_lim
 
             self.odrv.axis0.controller.config.pos_gain = pos_g
             self.odrv.axis0.controller.config.vel_gain = vel_g
             self.odrv.axis0.controller.config.vel_integrator_gain = vel_i_g
 
-            # Zero out setpoints to prevent sudden jumps
             self.odrv.axis0.controller.input_pos = self.odrv.axis0.encoder.pos_estimate
             self.odrv.axis0.controller.input_vel = 0
 
@@ -170,6 +169,7 @@ class MainWindow(QMainWindow):
         self.pos_g_input = QLineEdit("20.0")
         self.vel_g_input = QLineEdit("0.0005")
         self.vel_i_input = QLineEdit("0.001")
+        self.vel_lim_input = QLineEdit("2.0")  # Default 2.0 turns/s
 
         tune_layout.addWidget(QLabel("Mode:"), 0, 0)
         tune_layout.addWidget(self.mode_select, 0, 1)
@@ -179,10 +179,12 @@ class MainWindow(QMainWindow):
         tune_layout.addWidget(self.vel_g_input, 2, 1)
         tune_layout.addWidget(QLabel("Vel Int Gain:"), 3, 0)
         tune_layout.addWidget(self.vel_i_input, 3, 1)
+        tune_layout.addWidget(QLabel("Vel Limit:"), 4, 0)  # Adjust row numbers
+        tune_layout.addWidget(self.vel_lim_input, 4, 1)
 
         self.apply_tuning_btn = QPushButton("Apply Gains & Close Loop")
         self.apply_tuning_btn.clicked.connect(self.apply_tuning)
-        tune_layout.addWidget(self.apply_tuning_btn, 4, 0, 1, 2)
+        tune_layout.addWidget(self.apply_tuning_btn, 5, 0, 1, 2)
         tune_group.setLayout(tune_layout)
         left_panel.addWidget(tune_group)
 
@@ -197,7 +199,8 @@ class MainWindow(QMainWindow):
         input_row.addWidget(self.target_input)
         input_row.addStretch()
         self.setpoint_slider = QSlider(Qt.Horizontal)
-        self.setpoint_slider.setRange(-100, 100)
+        self.setpoint_slider.setRange(-1000, 1000)
+
         self.setpoint_slider.valueChanged.connect(self.handle_slider_input)
         setpoint_layout.addLayout(input_row)
         setpoint_layout.addWidget(self.setpoint_slider)
@@ -273,7 +276,7 @@ class MainWindow(QMainWindow):
         plot.addLegend(offset=(10, 10))
 
     def handle_slider_input(self, val):
-        scaled_val = val / 10.0
+        scaled_val = val / 100.0
         self.target_input.setText(str(scaled_val))
         self.send_target(scaled_val)
 
@@ -281,7 +284,7 @@ class MainWindow(QMainWindow):
         try:
             val = float(self.target_input.text())
             self.setpoint_slider.blockSignals(True)
-            self.setpoint_slider.setValue(int(val * 10))
+            self.setpoint_slider.setValue(int(val * 100))
             self.setpoint_slider.blockSignals(False)
             self.send_target(val)
         except ValueError:
@@ -304,34 +307,29 @@ class MainWindow(QMainWindow):
             self.setpoint_slider.setRange(-100, 100)  # -10.0 to 10.0 Turns
             self.target_input.setText("0.0")
         else:  # Velocity
-            self.setpoint_slider.setRange(-50, 50)  # -5.0 to 5.0 Turns/s
+            self.setpoint_slider.setRange(-500, 500)  # -5.0 to 5.0 Turns/s
             self.target_input.setText("0.0")
         self.setpoint_slider.setValue(0)
         self.setpoint_slider.blockSignals(False)
 
     def apply_tuning(self):
         try:
-            # 1. Clear any latched errors first
             self.worker.clear_errors()
 
-            # 2. Get values from UI
             pg_val = float(self.pos_g_input.text())
             vg_val = float(self.vel_g_input.text())
             vig_val = float(self.vel_i_input.text())
+            vlim_val = float(self.vel_lim_input.text())  # Get the limit
 
-            # 3. Map Index to ODrive Enums
-            # Position = 1, Velocity = 3
             mode = CONTROL_MODE_POSITION_CONTROL if self.mode_select.currentIndex() == 0 else CONTROL_MODE_VELOCITY_CONTROL
 
-            # 4. Send to worker
-            self.worker.update_tuning(pg_val, vg_val, vig_val, mode)
+            # Pass vlim_val to the worker
+            self.worker.update_tuning(pg_val, vg_val, vig_val, vlim_val, mode)
 
-            # 5. Small delay then request state
             time.sleep(0.1)
             self.worker.set_state(AXIS_STATE_CLOSED_LOOP_CONTROL)
-
         except ValueError:
-            print("Invalid gain values")
+            print("Invalid numerical values")
 
     def handle_toggle_control(self):
         if self.current_axis_state == 8:  # CLOSED_LOOP
