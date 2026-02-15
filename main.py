@@ -145,7 +145,7 @@ class MainWindow(QMainWindow):
         left_panel.addStretch()
         main_layout.addLayout(left_panel, 1)
 
-        # Right Panel (Plots)
+        # Right Panel (Plots & Live Readouts)
         right_panel = QVBoxLayout()
         self.vbus_plot = pg.PlotWidget(title="Bus Voltage History")
         self.motion_plot = pg.PlotWidget(title="Motion Telemetry")
@@ -157,8 +157,23 @@ class MainWindow(QMainWindow):
         self.pos_curve = self.motion_plot.plot(pen=pg.mkPen(MPL_ORANGE, width=2.5), name="Position [Turns]")
         self.vel_curve = self.motion_plot.plot(pen=pg.mkPen(MPL_GREEN, width=2.5), name="Velocity [Turns/s]")
 
+        # NEW: Live Readout Labels below the motion plot
+        readout_layout = QHBoxLayout()
+        self.label_live_pos = QLabel("Pos: 0.000")
+        self.label_live_vel = QLabel("Vel: 0.000")
+
+        # Apply some styling to make them readable
+        readout_style = "font-size: 14pt; font-weight: bold; padding: 5px; border: 1px solid #ddd; border-radius: 4px; background: white;"
+        self.label_live_pos.setStyleSheet(readout_style + f" color: {MPL_ORANGE};")
+        self.label_live_vel.setStyleSheet(readout_style + f" color: {MPL_GREEN};")
+
+        readout_layout.addWidget(self.label_live_pos)
+        readout_layout.addWidget(self.label_live_vel)
+
         right_panel.addWidget(self.vbus_plot)
         right_panel.addWidget(self.motion_plot)
+        right_panel.addLayout(readout_layout)  # Add the labels to the layout
+
         main_layout.addLayout(right_panel, 3)
 
     def _style_plot(self, plot_widget, y_name, unit):
@@ -185,7 +200,11 @@ class MainWindow(QMainWindow):
         self.label_error.setText(f"Axis Error: {hex(data['error'])}")
         self.label_enc_error.setText(f"Enc Error: {hex(data['enc_error'])}")
 
-        # Update Plots
+        # NEW: Update the live readout labels
+        self.label_live_pos.setText(f"Pos: {data['pos']:.3f} Turns")
+        self.label_live_vel.setText(f"Vel: {data['vel']:.3f} Turns/s")
+
+        # ... [Keep existing plotting code] ...
         self.vbus_data.append(data['vbus'])
         self.pos_data.append(data['pos'])
         self.vel_data.append(data['vel'])
