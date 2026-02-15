@@ -196,6 +196,8 @@ class MainWindow(QMainWindow):
         # 3. Target Setpoint
         setpoint_group = QGroupBox("Target Setpoint")
         setpoint_layout = QVBoxLayout()
+
+        # Row 1: Manual Numeric Input
         input_row = QHBoxLayout()
         self.target_input = QLineEdit("0.0")
         self.target_input.setFixedWidth(80)
@@ -203,11 +205,37 @@ class MainWindow(QMainWindow):
         input_row.addWidget(QLabel("Setpoint Value:"))
         input_row.addWidget(self.target_input)
         input_row.addStretch()
+
+        # --- NEW: Row 2: Increment/Decrement Controls ---
+        step_row = QHBoxLayout()
+        self.minus_btn = QPushButton("-")
+        self.plus_btn = QPushButton("+")
+        self.step_input = QLineEdit("1.0")  # The value to add/subtract
+        self.step_input.setFixedWidth(50)
+        self.step_input.setAlignment(Qt.AlignCenter)
+
+        # Styling buttons to be square and clear
+        btn_style = "font-weight: bold; font-size: 14pt; width: 30px; height: 30px;"
+        self.minus_btn.setStyleSheet(btn_style)
+        self.plus_btn.setStyleSheet(btn_style)
+
+        self.minus_btn.clicked.connect(lambda: self.step_target(-1))
+        self.plus_btn.clicked.connect(lambda: self.step_target(1))
+
+        step_row.addWidget(QLabel("Step Size:"))
+        step_row.addWidget(self.step_input)
+        step_row.addWidget(self.minus_btn)
+        step_row.addWidget(self.plus_btn)
+        step_row.addStretch()
+        # ------------------------------------------------
+
+        # Row 3: Slider
         self.setpoint_slider = QSlider(Qt.Horizontal)
         self.setpoint_slider.setRange(-1000, 1000)
-
         self.setpoint_slider.valueChanged.connect(self.handle_slider_input)
+
         setpoint_layout.addLayout(input_row)
+        setpoint_layout.addLayout(step_row)  # Add the new row
         setpoint_layout.addWidget(self.setpoint_slider)
         setpoint_group.setLayout(setpoint_layout)
         left_panel.addWidget(setpoint_group)
@@ -232,6 +260,14 @@ class MainWindow(QMainWindow):
 
         self.reboot_btn = QPushButton("Reboot ODrive")
         self.reboot_btn.clicked.connect(self.handle_reboot)
+
+        self.calib_btn = QPushButton("Calibrate Encoder Offset")
+        self.calib_btn.clicked.connect(self.handle_calibration)
+        diag_layout.addWidget(self.calib_btn)
+
+        self.save_btn = QPushButton("Save Settings (ODrive Reboots)")
+        self.save_btn.clicked.connect(self.save_config)
+        diag_layout.addWidget(self.save_btn)
 
         # Add widgets to layout
         diag_layout.addWidget(self.toggle_ctrl_btn)
@@ -302,6 +338,19 @@ class MainWindow(QMainWindow):
         except ValueError:
             pass
 
+    def step_target(self, direction):
+        """Adds or subtracts the step value from the current target."""
+        try:
+            current_val = float(self.target_input.text())
+            step_size = float(self.step_input.text())
+            new_val = current_val + (direction * step_size)
+
+            # Update the text box (this triggers the update to ODrive)
+            self.target_input.setText(f"{new_val:.3f}")
+            self.handle_manual_input()
+        except ValueError:
+            pass
+
     def send_target(self, val):
         # Index 0 is Position, Index 1 is Velocity
         is_pos_mode = (self.mode_select.currentIndex() == 0)
@@ -312,6 +361,22 @@ class MainWindow(QMainWindow):
         else:
             # Tell worker to set input_vel
             self.worker.set_input(val, False)
+
+    def handle_calibration(self):
+        # 1. Motor must be in IDLE or it will ignore the command
+        self.worker.set_state(1)  # AXIS_STATE_IDLE
+        time.sleep(0.2)
+        # 2. Start Calibration
+        self.worker.set_state(7)  # AXIS_STATE_ENCODER_OFFSET_CALIBRATION
+
+        # Check if calibration was successful after a delay
+        time.sleep(2)
+        if self.worker.odrv:
+            enc_error = self.worker.odrv.axis0.encoder.error
+            if enc_error == 0:
+                self.status_label.setText("Status: Calibration Successful")
+            else:
+                self.status_label.setText(f"Status: Calibration Failed (Error: {hex(enc_error)})")
 
     def update_slider_limits(self, index):
         self.setpoint_slider.blockSignals(True)
@@ -353,6 +418,17 @@ class MainWindow(QMainWindow):
         self.worker.reboot()
         self.status_label.setText("Status: Rebooting...")
 
+    def save_config(self):
+        if self.worker.odrv:
+            self.worker.odrv.axis0.encoder.config.pre_calibrated = True
+            self.worker.odrv.axis0.motor.config.pre_calibrated = True
+            try:
+                self.worker.odrv.save_configuration()
+                print(f"Configuration saved. ODrive is rebooting...")
+            except:
+                # ODrive reboots after saving, so connection will momentarily drop
+                pass
+
     @Slot(dict)
     def update_telemetry(self, data):
         if "init_config" in data:
@@ -380,10 +456,13 @@ class MainWindow(QMainWindow):
             self.toggle_ctrl_btn.setStyleSheet(
                 "background-color: #388E3C; color: white; font-weight: bold; height: 30px;")
 
+
+
         # Update labels
-        states = {0: "UNDEFINED", 1: "IDLE", 8: "CLOSED_LOOP"}
+        states = {0: "UNDEFINED", 1: "IDLE", 8: "CLOSED_LOOP", 7: "ENC_CALIB", 3: "MOTOR_CALIB"}
         state_text = states.get(data['state'], f"State: {data['state']}")
         self.label_state.setText(f"State: {state_text}")
+
 
         ctrl_modes = {1: "VOLTAGE", 2: "TORQUE", 3: "VELOCITY", 4: "POSITION"}
         self.label_ctrl_mode.setText(f"Ctrl Mode: {ctrl_modes.get(data['ctrl_mode'], data['ctrl_mode'])}")
